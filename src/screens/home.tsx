@@ -42,7 +42,7 @@ const styles = StyleSheet.create({
   container: {
     width: "100%",
     flex: 1,
-    backgroundColor: "#fff",
+    backgroundColor: "#F5F0EB",
     paddingHorizontal: null,
     paddingTop: null,
     paddingBottom: null,
