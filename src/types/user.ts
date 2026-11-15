@@ -16,7 +16,6 @@ export type Usuario = {
   username: string;
   nome: string;
   email: string;
-  senhaHash: string;
   papel: "usuario" | "admin" | "moderador";
   ativo: boolean;
   avatarUrl: string;
