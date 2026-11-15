@@ -3,14 +3,23 @@ import { Usuario } from "../types/user";
 
 type Props = {
   usuario: Usuario;
+  onOutro?: () => void;
 };
 
-export function AcompanhanteCard({ usuario }: Props) {
+export function AcompanhanteCard({ usuario, onOutro }: Props) {
   const { width } = useWindowDimensions();
   const perfilUrl = `https://www.acompanhe.com.br/user/${usuario.username}`;
 
   function abrirPerfil() {
     Linking.openURL(perfilUrl);
+  }
+
+  function aoClicarOutro() {
+    if (onOutro) {
+      onOutro();
+    } else {
+      abrirPerfil();
+    }
   }
 
   const isCelularPequeno = width < 360;
@@ -22,7 +31,7 @@ export function AcompanhanteCard({ usuario }: Props) {
   const tamanhoTexto = isCelularPequeno ? 13 : 14;
 
   return (
-    <View style={[styles.card, { height: alturaCard }]}>
+    <View style={styles.card}>
       <Image
         source={{ uri: usuario.avatarUrl }}
         style={styles.fotoGrande}
@@ -54,7 +63,7 @@ export function AcompanhanteCard({ usuario }: Props) {
           </Pressable>
 
           <Pressable
-            onPress={abrirPerfil}
+            onPress={aoClicarOutro}
             hitSlop={8}
             style={({ pressed }) => [
               styles.botao,
@@ -74,7 +83,6 @@ export function AcompanhanteCard({ usuario }: Props) {
 
 const styles = StyleSheet.create({
   card: {
-    flex: 1,
     width: "100%",
     maxWidth: 520,
     alignSelf: "center",
@@ -83,7 +91,6 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     flexDirection: "column",
     justifyContent: "flex-start",
-    // Sombra suave no lugar da borda preta
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.08,
@@ -93,12 +100,11 @@ const styles = StyleSheet.create({
   fotoGrande: {
     width: "100%",
     backgroundColor: "#E8E0D8",
-    flex: 1,
+    height: 320,
   },
   infoArea: {
     paddingVertical: 16,
     justifyContent: "flex-start",
-    gap: 4,
     backgroundColor: "#FFFFFF",
     minHeight: 148,
   },
@@ -111,7 +117,6 @@ const styles = StyleSheet.create({
     color: "#6B6B6B",
   },
   botoesArea: {
-    gap: 10,
     marginTop: 12,
   },
   botao: {
@@ -120,6 +125,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
+    marginBottom: 10,
   },
   botaoPrimario: {
     backgroundColor: "#B08D57",

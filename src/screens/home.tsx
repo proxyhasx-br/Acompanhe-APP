@@ -1,50 +1,49 @@
-import { View, StyleSheet } from "react-native";
-import { AcompanhanteCard } from "../components/AcompanhamentoCard";
-import { Usuario } from "../types/user";
+import { useRef, useState } from "react";
+import { View, ScrollView, StyleSheet, useWindowDimensions } from "react-native";
+import { BottomMenu, Secao } from "../components/BottomMenu";
+import { HomeScreen } from "./HomeScreen";
+import { ComunidadeScreen } from "./ComunidadeScreen";
+import { BuscaScreen } from "./BuscaScreen";
+import { MensagensScreen } from "./MensagensScreen";
+import { PerfilScreen } from "./PerfilScreen";
 
-const usuario: Usuario = {
-  id: "f3a8c1e2-9b4d-4a7f-8c2e-1a9b3c4d5e6f",
-  username: "proxyhasx",
-  nome: "Lucas Pereira",
-  email: "lucas.pereira@teste.com",
-  senhaHash: "a9f3c8e1b2d4a7f6c9e0b1a2c3d4e5f6",
-  papel: "usuario",
-  ativo: true,
-  avatarUrl: "https://i.pravatar.cc/150?img=12",
-  telefone: "+55 27 98765-4321",
-  dataNascimento: "1998-07-22",
-  idade: 28,
-  acompanhante: true,
-  endereco: {
-    rua: "Rua das Flores, 123",
-    cidade: "Vitória",
-    estado: "ES",
-    cep: "29010-123",
-  },
-  preferencias: {
-    tema: "escuro",
-    idioma: "pt-BR",
-    receberEmails: false,
-  },
-  ultimoLoginEm: "2026-11-14T20:30:00Z",
-  atualizadoEm: "2026-11-14T20:30:00Z",
-};
+const ORDEM: Secao[] = ["home", "comunidade", "busca", "mensagens", "perfil"];
 
+// Home aqui é o CONTAINER das telas
 export function Home() {
+  const pagerRef = useRef<any>(null);
+  const [ativa, setAtiva] = useState<Secao>("home");
+  const { width } = useWindowDimensions();
+
+  function irPara(secao: Secao) {
+    const i = ORDEM.indexOf(secao);
+    setAtiva(secao);
+    pagerRef.current?.scrollTo({ x: i * width, animated: true });
+  }
+
+  function aoMudarPagina(e: any) {
+    const x = e.nativeEvent.contentOffset.x;
+    const i = Math.round(x / width);
+    const secao = ORDEM[i] ?? "home";
+    if (secao !== ativa) setAtiva(secao);
+  }
+
   return (
     <View style={styles.container}>
-      <AcompanhanteCard usuario={usuario} />
+      <ScrollView ref={pagerRef} horizontal pagingEnabled showsHorizontalScrollIndicator={false} onMomentumScrollEnd={aoMudarPagina} scrollEventThrottle={16} style={styles.pager}>
+        <View style={{ width, flex: 1 }}><HomeScreen /></View>
+        <View style={{ width, flex: 1 }}><ComunidadeScreen /></View>
+        <View style={{ width, flex: 1 }}><BuscaScreen /></View>
+        <View style={{ width, flex: 1 }}><MensagensScreen /></View>
+        <View style={{ width, flex: 1 }}><PerfilScreen /></View>
+      </ScrollView>
+      <BottomMenu ativa={ativa} onSelecionar={irPara} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    width: "100%",
-    flex: 1,
-    backgroundColor: "#F5F0EB",
-    paddingHorizontal: null,
-    paddingTop: null,
-    paddingBottom: null,
-  },
+  container: { width: "100%", flex: 1, flexDirection: "column", backgroundColor: "#F5F0EB" },
+  pager: { flex: 1, width: "100%" },
 });
+  
