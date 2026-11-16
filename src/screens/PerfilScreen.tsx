@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, Text, TextInput, TouchableOpacity, Image, ActivityIndicator, Alert, StyleSheet } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, Image, ActivityIndicator, Alert, StyleSheet, Modal } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../contexts/AuthContext";
 import { supabase } from "../lib/supabase";
@@ -12,6 +12,7 @@ export default function PerfilScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
 
   useEffect(() => {
     async function loadProfile() {
@@ -97,11 +98,9 @@ export default function PerfilScreen() {
     else Alert.alert("Salvo", "Seu perfil foi atualizado.");
   }
 
-  async function handleLogout() {
-    Alert.alert("Sair", "Deseja sair da sua conta?", [
-      { text: "Cancelar", style: "cancel" },
-      { text: "Sair", style: "destructive", onPress: async () => await signOut() },
-    ]);
+  async function handleConfirmLogout() {
+    setShowLogoutModal(false);
+    await signOut();
   }
 
   if (loading) {
@@ -139,9 +138,29 @@ export default function PerfilScreen() {
         <Text style={styles.saveText}>{saving ? "Salvando..." : "Salvar perfil"}</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+      <TouchableOpacity style={styles.logoutButton} onPress={() => setShowLogoutModal(true)}>
         <Text style={styles.logoutText}>Sair da conta</Text>
       </TouchableOpacity>
+
+      {/* MODAL DE SAIR - mini telinha */}
+      <Modal visible={showLogoutModal} transparent animationType="fade" onRequestClose={() => setShowLogoutModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>Deseja realmente sair?</Text>
+            <Text style={styles.modalSubtitle}>Você vai precisar logar novamente para continuar.</Text>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.modalCancelButton} onPress={() => setShowLogoutModal(false)}>
+                <Text style={styles.modalCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.modalConfirmButton} onPress={handleConfirmLogout}>
+                <Text style={styles.modalConfirmText}>Sair</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -162,4 +181,15 @@ const styles = StyleSheet.create({
   saveText: { color: "#fff", fontWeight: "bold" },
   logoutButton: { borderWidth: 1, borderColor: "#ff5a5a", padding: 14, borderRadius: 10, alignItems: "center", marginTop: 12 },
   logoutText: { color: "#ff5a5a", fontWeight: "bold" },
+
+  // Modal
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", alignItems: "center", justifyContent: "center", padding: 20 },
+  modalBox: { backgroundColor: "#fff", width: "100%", maxWidth: 340, borderRadius: 16, padding: 22 },
+  modalTitle: { fontSize: 18, fontWeight: "bold", textAlign: "center" },
+  modalSubtitle: { color: "#666", textAlign: "center", marginTop: 8, marginBottom: 20 },
+  modalButtons: { flexDirection: "row", gap: 10 },
+  modalCancelButton: { flex: 1, borderWidth: 1, borderColor: "#ddd", padding: 12, borderRadius: 10, alignItems: "center" },
+  modalCancelText: { fontWeight: "bold", color: "#333" },
+  modalConfirmButton: { flex: 1, backgroundColor: "#ff5a5a", padding: 12, borderRadius: 10, alignItems: "center" },
+  modalConfirmText: { fontWeight: "bold", color: "#fff" },
 });
