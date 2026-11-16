@@ -1,24 +1,17 @@
 import { useState, useEffect } from "react";
 import { View, Text, Image, ScrollView, StyleSheet, useWindowDimensions, TouchableOpacity, TextInput, Modal, Alert, ActivityIndicator } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useAuth } from "../contexts/AuthContext";
 import { supabase } from "../lib/supabase";
-import { conversasIniciais } from "../data/mock";
 
-type Mensagem = { id: string; texto: string; minha: boolean; hora: string };
-type Conversa = { id: string; autor: string; avatar: string; ultima: string; tempo: string; naoLidas: number; bio: string; mensagens: Mensagem[] };
+type Mensagem = { id: string; texto: string; minha: boolean; hora: string; sender_id: string; created_at: string };
+type Outro = { id: string; nome: string; username: string; avatar_url: string | null; bio: string | null };
+type Conversa = { id: string; outro: Outro; ultima: string; tempo: string; naoLidas: number; mensagens: Mensagem[] };
 
-function criarConversasIniciais(): Conversa[] {
-  return conversasIniciais.map((c: any) => ({
-    id: String(c.id),
-    autor: c.autor,
-    avatar: c.avatar,
-    ultima: c.ultima,
-    tempo: c.tempo,
-    naoLidas: c.naoLidas || 0,
-    bio: "Membro da comunidade Acompanhe. Adora conversar e conhecer gente nova.",
-    mensagens: [{ id: "m1", texto: c.ultima, minha: false, hora: c.tempo }],
-  }));
+function formatarHora(data: string) {
+  const d = new Date(data);
+  const hoje = new Date();
+  if (d.toDateString() === hoje.toDateString()) return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
 
 export function MensagensScreen() {
@@ -35,102 +28,150 @@ export function MensagensScreen() {
   const [showNovaMensagem, setShowNovaMensagem] = useState(false);
   const [showDenunciar, setShowDenunciar] = useState(false);
   const [showPerfil, setShowPerfil] = useState(false);
-  const [perfilVisitado, setPerfilVisitado] = useState<Conversa | null>(null);
+  const [perfilVisitado, setPerfilVisitado] = useState<Outro | null>(null);
   const [mensagemParaApagar, setMensagemParaApagar] = useState<{ conversaId: string; mensagemId: string } | null>(null);
-  const [novoNome, setNovoNome] = useState("");
-  const [novaMensagem, setNovaMensagem] = useState("");
+  const [usuarios, setUsuarios] = useState<Outro[]>([]);
+  const [buscaUsuario, setBuscaUsuario] = useState("");
+  const [outroSelecionado, setOutroSelecionado] = useState<Outro | null>(null);
 
-  const storageKey = `acompanhhe_mensagens_${user?.id || "anonimo"}`;
   const conversaAberta = conversas.find((c) => c.id === conversaAbertaId);
 
-  // CARREGAR - quando abre a tela, busca o que estava salvo
-  useEffect(() => {
-    async function carregar() {
-      try {
-        const salvo = await AsyncStorage.getItem(storageKey);
-        if (salvo) {
-          setConversas(JSON.parse(salvo));
-        } else {
-          setConversas(criarConversasIniciais());
-        }
-      } catch {
-        setConversas(criarConversasIniciais());
-      } finally {
-        setCarregando(false);
-      }
+  // AVISA O App.tsx pra zerar o badge do menu na hora
+  async function avisarBadgeZerou() {
+    await supabase.channel(`badge-${user?.id}`).send({ type: "broadcast", event: "refresh", payload: {} });
+  }
+
+  // CARREGAR - agora conta as não lidas de verdade
+  async function carregarConversas() {
+    if (!user) return;
+    const { data: lista } = await supabase.from("conversas").select("*").or(`user1.eq.${user.id},user2.eq.${user.id}`).order("updated_at", { ascending: false });
+    if (!lista) { setCarregando(false); return; }
+
+    const montadas: Conversa[] = [];
+    for (const conv of lista) {
+      const outroId = conv.user1 === user.id ? conv.user2 : conv.user1;
+      const { data: perfil } = await supabase.from("profiles").select("id, nome, username, avatar_url, bio").eq("id", outroId).single();
+      const { data: msgs } = await supabase.from("mensagens").select("*").eq("conversa_id", conv.id).order("created_at", { ascending: true });
+      const mensagens: Mensagem[] = (msgs || []).map((m: any) => ({ id: m.id, texto: m.texto, minha: m.sender_id === user.id, hora: formatarHora(m.created_at), sender_id: m.sender_id, created_at: m.created_at }));
+      const ultimaMsg = mensagens[mensagens.length - 1];
+      const { count } = await supabase.from("mensagens").select("*", { count: "exact", head: true }).eq("conversa_id", conv.id).neq("sender_id", user.id).eq("lida", false);
+      montadas.push({
+        id: conv.id,
+        outro: perfil || { id: outroId, nome: "Usuário", username: "usuario", avatar_url: null, bio: "" },
+        ultima: ultimaMsg ? ultimaMsg.texto : "Nova conversa",
+        tempo: ultimaMsg ? ultimaMsg.hora : formatarHora(conv.created_at),
+        naoLidas: count || 0,
+        mensagens,
+      });
     }
-    carregar();
-  }, [user?.id]);
+    setConversas(montadas);
+    setCarregando(false);
+  }
 
-  // SALVAR AUTOMÁTICO - toda vez que conversas muda, salva
+  useEffect(() => { carregarConversas(); }, [user?.id]);
+
+  // REALTIME - mensagem nova na conversa aberta
   useEffect(() => {
-    if (carregando) return;
-    AsyncStorage.setItem(storageKey, JSON.stringify(conversas));
-  }, [conversas, carregando]);
+    if (!conversaAbertaId || !user) return;
+    const channel = supabase.channel(`chat-${conversaAbertaId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "mensagens", filter: `conversa_id=eq.${conversaAbertaId}` }, async (payload: any) => {
+        const m = payload.new;
+        const nova: Mensagem = { id: m.id, texto: m.texto, minha: m.sender_id === user.id, hora: formatarHora(m.created_at), sender_id: m.sender_id, created_at: m.created_at };
+        setConversas((prev) => prev.map((c) => c.id === conversaAbertaId ? { ...c, mensagens: [...c.mensagens.filter((x) => x.id !== nova.id), nova], ultima: nova.texto, tempo: nova.hora, naoLidas: 0 } : c));
+        if (m.sender_id !== user.id) {
+          await supabase.from("mensagens").update({ lida: true }).eq("id", m.id);
+          avisarBadgeZerou();
+        }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [conversaAbertaId, user?.id]);
 
-  // Filtro da busca
-  const conversasFiltradas = conversas.filter((c) =>
-    c.autor.toLowerCase().includes(busca.toLowerCase()) ||
-    c.ultima.toLowerCase().includes(busca.toLowerCase())
-  );
+  // REALTIME - atualiza a lista quando chega mensagem em outra conversa
+  useEffect(() => {
+    if (!user) return;
+    const channel = supabase.channel(`minhas-mensagens-${user.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "mensagens" }, (payload: any) => {
+        if (payload.new?.conversa_id !== conversaAbertaId) carregarConversas();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user?.id, conversaAbertaId]);
 
-  function abrirConversa(c: Conversa) {
+  async function carregarUsuarios() {
+    if (!user) return;
+    const { data } = await supabase.from("profiles").select("id, nome, username, avatar_url, bio").neq("id", user.id).limit(30);
+    setUsuarios(data || []);
+  }
+
+  // ABRIR - marca tudo como lido + avisa o App.tsx
+  async function abrirConversa(c: Conversa) {
+    if (!user) return;
+    await supabase.from("mensagens").update({ lida: true }).eq("conversa_id", c.id).neq("sender_id", user.id).eq("lida", false);
     setConversas((prev) => prev.map((x) => (x.id === c.id ? { ...x, naoLidas: 0 } : x)));
     setConversaAbertaId(c.id);
+    avisarBadgeZerou();
   }
 
+  // ENVIAR - nasce como não lida pro outro lado
   async function enviarMensagem() {
-    if (!texto.trim() || !conversaAberta) return;
-    const nova: Mensagem = { id: Date.now().toString(), texto: texto.trim(), minha: true, hora: "Agora" };
-    setConversas((prev) => prev.map((c) => c.id === conversaAberta.id ? { ...c, mensagens: [...c.mensagens, nova], ultima: nova.texto, tempo: "Agora" } : c));
+    if (!texto.trim() || !conversaAberta || !user) return;
+    const textoEnviar = texto.trim();
     setTexto("");
-    // Tenta salvar no Supabase também, mas não trava se a tabela ainda não existir
-    if (user) {
-      try {
-        await supabase.from("mensagens").insert({ conversa_id: conversaAberta.id, sender_id: user.id, texto: nova.texto });
-      } catch {}
-    }
-    setTimeout(() => {
-      const resposta: Mensagem = { id: (Date.now() + 1).toString(), texto: "Entendi! Vamos conversar mais sobre isso.", minha: false, hora: "Agora" };
-      setConversas((prev) => prev.map((c) => c.id === conversaAberta.id ? { ...c, mensagens: [...c.mensagens, resposta], ultima: resposta.texto } : c));
-    }, 1500);
+    const { error } = await supabase.from("mensagens").insert({ conversa_id: conversaAberta.id, sender_id: user.id, texto: textoEnviar, lida: false });
+    if (error) Alert.alert("Erro", error.message);
+    await supabase.from("conversas").update({ updated_at: new Date().toISOString() }).eq("id", conversaAberta.id);
   }
 
-  function limparConversa(id: string) {
-    setConversas((prev) => prev.map((c) => c.id === id ? { ...c, mensagens: [], ultima: "Conversa limpa", tempo: "Agora" } : c));
+  async function criarOuAbrirConversa(outro: Outro) {
+    if (!user) return;
+    const { data: existente } = await supabase.from("conversas").select("*").or(`and(user1.eq.${user.id},user2.eq.${outro.id}),and(user1.eq.${outro.id},user2.eq.${user.id})`).maybeSingle();
+    if (existente) {
+      setShowNovaMensagem(false);
+      await carregarConversas();
+      await supabase.from("mensagens").update({ lida: true }).eq("conversa_id", existente.id).neq("sender_id", user.id).eq("lida", false);
+      setConversaAbertaId(existente.id);
+      avisarBadgeZerou();
+      return;
+    }
+    const { data: nova, error } = await supabase.from("conversas").insert({ user1: user.id, user2: outro.id }).select().single();
+    if (error) { Alert.alert("Erro", error.message); return; }
+    setShowNovaMensagem(false);
+    setOutroSelecionado(null);
+    await carregarConversas();
+    setConversaAbertaId(nova.id);
+  }
+
+  async function limparConversa(id: string) {
+    await supabase.from("mensagens").delete().eq("conversa_id", id);
+    setConversas((prev) => prev.map((c) => c.id === id ? { ...c, mensagens: [], ultima: "Conversa limpa", tempo: "Agora", naoLidas: 0 } : c));
     setMenuConversa(null);
   }
 
-  function apagarConversa(id: string) {
+  async function apagarConversa(id: string) {
+    await supabase.from("conversas").delete().eq("id", id);
     setConversas((prev) => prev.filter((c) => c.id !== id));
     if (conversaAbertaId === id) setConversaAbertaId(null);
     setMenuConversa(null);
   }
 
-  function apagarMensagem() {
+  async function apagarMensagem() {
     if (!mensagemParaApagar) return;
+    await supabase.from("mensagens").delete().eq("id", mensagemParaApagar.mensagemId);
     setConversas((prev) => prev.map((c) => c.id === mensagemParaApagar.conversaId ? { ...c, mensagens: c.mensagens.filter((m) => m.id !== mensagemParaApagar.mensagemId) } : c));
     setMensagemParaApagar(null);
   }
 
-  function criarNovaConversa() {
-    if (!novoNome.trim()) return;
-    const nova: Conversa = {
-      id: Date.now().toString(),
-      autor: novoNome.trim().replace("@", ""),
-      avatar: `https://i.pravatar.cc/150?img=${Math.floor(Math.random() * 70) + 1}`,
-      ultima: novaMensagem.trim() || "Nova conversa",
-      tempo: "Agora",
-      naoLidas: 0,
-      bio: "Novo contato da comunidade Acompanhe.",
-      mensagens: novaMensagem.trim() ? [{ id: "m1", texto: novaMensagem.trim(), minha: true, hora: "Agora" }] : [],
-    };
-    setConversas((prev) => [nova, ...prev]);
-    setNovoNome("");
-    setNovaMensagem("");
-    setShowNovaMensagem(false);
-    setConversaAbertaId(nova.id);
-  }
+  const conversasFiltradas = conversas.filter((c) =>
+    (c.outro.nome || "").toLowerCase().includes(busca.toLowerCase()) ||
+    (c.outro.username || "").toLowerCase().includes(busca.toLowerCase()) ||
+    c.ultima.toLowerCase().includes(busca.toLowerCase())
+  );
+
+  const usuariosFiltrados = usuarios.filter((u) =>
+    (u.nome || "").toLowerCase().includes(buscaUsuario.toLowerCase()) ||
+    (u.username || "").toLowerCase().includes(buscaUsuario.toLowerCase())
+  );
 
   if (carregando) {
     return (
@@ -146,10 +187,10 @@ export function MensagensScreen() {
       <View style={styles.chatContainer}>
         <View style={styles.chatHeader}>
           <TouchableOpacity onPress={() => setConversaAbertaId(null)}><Text style={styles.voltar}>{"< Voltar"}</Text></TouchableOpacity>
-          <TouchableOpacity style={styles.chatPerfil} onPress={() => { setPerfilVisitado(conversaAberta); setShowPerfil(true); }}>
-            <Image source={{ uri: conversaAberta.avatar }} style={styles.chatAvatar} />
+          <TouchableOpacity style={styles.chatPerfil} onPress={() => { setPerfilVisitado(conversaAberta.outro); setShowPerfil(true); }}>
+            <Image source={{ uri: conversaAberta.outro.avatar_url || "https://i.pravatar.cc/150?img=1" }} style={styles.chatAvatar} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.chatNome}>@{conversaAberta.autor}</Text>
+              <Text style={styles.chatNome}>@{conversaAberta.outro.username || conversaAberta.outro.nome}</Text>
               <Text style={styles.chatStatus}>Online • Toque para ver perfil</Text>
             </View>
           </TouchableOpacity>
@@ -159,9 +200,9 @@ export function MensagensScreen() {
         <ScrollView style={styles.mensagensArea} contentContainerStyle={{ padding: 16, paddingBottom: 20 }}>
           {conversaAberta.mensagens.length === 0 && <Text style={styles.vazio}>Nenhuma mensagem. Mande um oi!</Text>}
           {conversaAberta.mensagens.map((m) => (
-            <TouchableOpacity key={m.id} onLongPress={() => setMensagemParaApagar({ conversaId: conversaAberta.id, mensagemId: m.id })} style={[styles.bolha, m.minha ? styles.bolhaMinha : styles.bolhaDeles]}>
+            <TouchableOpacity key={m.id} onLongPress={() => { if (m.minha) setMensagemParaApagar({ conversaId: conversaAberta.id, mensagemId: m.id }); }} style={[styles.bolha, m.minha ? styles.bolhaMinha : styles.bolhaDeles]}>
               <Text style={[styles.bolhaTexto, m.minha ? { color: "#fff" } : {}]}>{m.texto}</Text>
-              <Text style={[styles.bolhaHora, m.minha ? { color: "#E8E0D8" } : {}]}>{m.hora} • Segure para apagar</Text>
+              <Text style={[styles.bolhaHora, m.minha ? { color: "#E8E0D8" } : {}]}>{m.hora}{m.minha ? " • Segure para apagar" : ""}</Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
@@ -174,7 +215,7 @@ export function MensagensScreen() {
         <Modal visible={!!menuConversa} transparent animationType="fade" onRequestClose={() => setMenuConversa(null)}>
           <TouchableOpacity style={styles.modalOverlay} onPress={() => setMenuConversa(null)}>
             <View style={styles.menuBox}>
-              <TouchableOpacity style={styles.menuItem} onPress={() => { if (menuConversa) { setPerfilVisitado(menuConversa); setMenuConversa(null); setShowPerfil(true); } }}><Text style={styles.menuItemTexto}>Visitar perfil</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.menuItem} onPress={() => { if (menuConversa) { setPerfilVisitado(menuConversa.outro); setMenuConversa(null); setShowPerfil(true); } }}><Text style={styles.menuItemTexto}>Visitar perfil</Text></TouchableOpacity>
               <TouchableOpacity style={styles.menuItem} onPress={() => { if (menuConversa) limparConversa(menuConversa.id); }}><Text style={styles.menuItemTexto}>Limpar conversa</Text></TouchableOpacity>
               <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuConversa(null); setShowDenunciar(true); }}><Text style={styles.menuItemTexto}>Denunciar</Text></TouchableOpacity>
               <TouchableOpacity style={[styles.menuItem, { borderBottomWidth: 0 }]} onPress={() => { if (menuConversa) apagarConversa(menuConversa.id); }}><Text style={[styles.menuItemTexto, { color: "#ff5a5a" }]}>Apagar conversa</Text></TouchableOpacity>
@@ -185,7 +226,7 @@ export function MensagensScreen() {
         <Modal visible={showDenunciar} transparent animationType="fade" onRequestClose={() => setShowDenunciar(false)}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalBoxGrande}>
-              <Text style={styles.modalTitle}>Denunciar @{conversaAberta.autor}</Text>
+              <Text style={styles.modalTitle}>Denunciar @{conversaAberta.outro.username}</Text>
               <Text style={styles.modalSub}>Por que você está denunciando essa conversa?</Text>
               {["Spam", "Conteúdo inapropriado", "Assédio", "Outro motivo"].map((motivo) => (
                 <TouchableOpacity key={motivo} style={styles.motivoBtn} onPress={() => { setShowDenunciar(false); Alert.alert("Denúncia enviada", `Obrigado por denunciar por: ${motivo}`); }}>
@@ -201,9 +242,9 @@ export function MensagensScreen() {
           <View style={styles.modalOverlay}>
             <View style={styles.modalBoxGrande}>
               {perfilVisitado && (<>
-                <Image source={{ uri: perfilVisitado.avatar }} style={styles.perfilAvatar} />
-                <Text style={styles.perfilNome}>@{perfilVisitado.autor}</Text>
-                <Text style={styles.perfilBio}>{perfilVisitado.bio}</Text>
+                <Image source={{ uri: perfilVisitado.avatar_url || "https://i.pravatar.cc/150?img=1" }} style={styles.perfilAvatar} />
+                <Text style={styles.perfilNome}>@{perfilVisitado.username || perfilVisitado.nome}</Text>
+                <Text style={styles.perfilBio}>{perfilVisitado.bio || "Membro da comunidade Acompanhe."}</Text>
                 <TouchableOpacity style={styles.verPerfilBtn} onPress={() => { setShowPerfil(false); Alert.alert("Perfil", "Aqui vai abrir a tela de perfil completa desse usuário."); }}><Text style={styles.verPerfilTexto}>Ver perfil completo</Text></TouchableOpacity>
               </>)}
               <TouchableOpacity style={styles.cancelarBtn} onPress={() => setShowPerfil(false)}><Text style={styles.cancelarTexto}>Fechar</Text></TouchableOpacity>
@@ -215,7 +256,7 @@ export function MensagensScreen() {
           <View style={styles.modalOverlay}>
             <View style={styles.modalBoxGrande}>
               <Text style={styles.modalTitle}>Apagar mensagem?</Text>
-              <Text style={styles.modalSub}>Essa mensagem será apagada só para você.</Text>
+              <Text style={styles.modalSub}>Essa mensagem será apagada para todos.</Text>
               <TouchableOpacity style={[styles.verPerfilBtn, { backgroundColor: "#ff5a5a" }]} onPress={apagarMensagem}><Text style={styles.verPerfilTexto}>Apagar mensagem</Text></TouchableOpacity>
               <TouchableOpacity style={styles.cancelarBtn} onPress={() => setMensagemParaApagar(null)}><Text style={styles.cancelarTexto}>Cancelar</Text></TouchableOpacity>
             </View>
@@ -233,10 +274,9 @@ export function MensagensScreen() {
           <Text style={[styles.titulo, { fontSize: isCelularPequeno ? 22 : 26 }]}>Mensagens</Text>
           <Text style={styles.subtitulo}>Suas conversas com acompanhantes e membros</Text>
         </View>
-        <TouchableOpacity style={styles.novaBtn} onPress={() => setShowNovaMensagem(true)}><Text style={styles.novaBtnTexto}>+ Nova</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.novaBtn} onPress={() => { carregarUsuarios(); setShowNovaMensagem(true); }}><Text style={styles.novaBtnTexto}>+ Nova</Text></TouchableOpacity>
       </View>
 
-      {/* CAMPO DE BUSCA */}
       <View style={styles.buscaBox}>
         <Text style={styles.buscaIcone}>🔍</Text>
         <TextInput style={styles.buscaInput} value={busca} onChangeText={setBusca} placeholder="Buscar por nome ou mensagem..." placeholderTextColor="#999" />
@@ -249,14 +289,14 @@ export function MensagensScreen() {
 
       {conversasFiltradas.map((c) => (
         <TouchableOpacity key={c.id} style={styles.card} onPress={() => abrirConversa(c)}>
-          <Image source={{ uri: c.avatar }} style={styles.avatar} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.nome}>@{c.autor}</Text>
-            <Text style={styles.ultima} numberOfLines={1}>{c.ultima}</Text>
+          <Image source={{ uri: c.outro.avatar_url || "https://i.pravatar.cc/150?img=1" }} style={styles.avatar} />
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={[styles.nome, c.naoLidas > 0 && { fontWeight: "800" }]} numberOfLines={1}>@{c.outro.username || c.outro.nome}</Text>
+            <Text style={[styles.ultima, c.naoLidas > 0 && { color: "#1C1C1C", fontWeight: "700" }]} numberOfLines={1}>{c.ultima}</Text>
           </View>
-          <View style={{ alignItems: "flex-end" }}>
-            <Text style={styles.tempo}>{c.tempo}</Text>
-            {c.naoLidas > 0 && (<View style={styles.badge}><Text style={styles.badgeTexto}>{c.naoLidas}</Text></View>)}
+          <View style={styles.cardRight}>
+            <Text style={[styles.tempo, c.naoLidas > 0 && { color: "#B08D57", fontWeight: "800" }]}>{c.tempo}</Text>
+            {c.naoLidas > 0 && (<View style={styles.badge}><Text style={styles.badgeTexto}>{c.naoLidas > 99 ? "99+" : c.naoLidas}</Text></View>)}
           </View>
           <TouchableOpacity onPress={() => setMenuConversa(c)} style={styles.tresPontosBtn}><Text style={styles.tresPontos}>⋮</Text></TouchableOpacity>
         </TouchableOpacity>
@@ -265,7 +305,7 @@ export function MensagensScreen() {
       <Modal visible={!!menuConversa && !conversaAbertaId} transparent animationType="fade" onRequestClose={() => setMenuConversa(null)}>
         <TouchableOpacity style={styles.modalOverlay} onPress={() => setMenuConversa(null)}>
           <View style={styles.menuBox}>
-            <TouchableOpacity style={styles.menuItem} onPress={() => { if (menuConversa) { setPerfilVisitado(menuConversa); setMenuConversa(null); setShowPerfil(true); } }}><Text style={styles.menuItemTexto}>Visitar perfil</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.menuItem} onPress={() => { if (menuConversa) { setPerfilVisitado(menuConversa.outro); setMenuConversa(null); setShowPerfil(true); } }}><Text style={styles.menuItemTexto}>Visitar perfil</Text></TouchableOpacity>
             <TouchableOpacity style={styles.menuItem} onPress={() => { if (menuConversa) limparConversa(menuConversa.id); }}><Text style={styles.menuItemTexto}>Limpar conversa</Text></TouchableOpacity>
             <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuConversa(null); setShowDenunciar(true); }}><Text style={styles.menuItemTexto}>Denunciar</Text></TouchableOpacity>
             <TouchableOpacity style={[styles.menuItem, { borderBottomWidth: 0 }]} onPress={() => { if (menuConversa) apagarConversa(menuConversa.id); }}><Text style={[styles.menuItemTexto, { color: "#ff5a5a" }]}>Apagar conversa</Text></TouchableOpacity>
@@ -277,12 +317,23 @@ export function MensagensScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalBoxGrande}>
             <Text style={styles.modalTitle}>Nova mensagem</Text>
-            <Text style={styles.label}>Para quem?</Text>
-            <TextInput style={styles.inputModal} value={novoNome} onChangeText={setNovoNome} placeholder="@usuario" />
-            <Text style={styles.label}>Primeira mensagem</Text>
-            <TextInput style={[styles.inputModal, { height: 70 }]} value={novaMensagem} onChangeText={setNovaMensagem} placeholder="Oi! Tudo bem?" multiline />
-            <TouchableOpacity style={styles.verPerfilBtn} onPress={criarNovaConversa}><Text style={styles.verPerfilTexto}>Começar conversa</Text></TouchableOpacity>
-            <TouchableOpacity style={styles.cancelarBtn} onPress={() => setShowNovaMensagem(false)}><Text style={styles.cancelarTexto}>Cancelar</Text></TouchableOpacity>
+            <Text style={styles.label}>Buscar usuário</Text>
+            <TextInput style={styles.inputModal} value={buscaUsuario} onChangeText={setBuscaUsuario} placeholder="Buscar por nome ou @usuario" />
+            <ScrollView style={{ maxHeight: 220, marginTop: 10 }}>
+              {usuariosFiltrados.map((u) => (
+                <TouchableOpacity key={u.id} style={[styles.usuarioRow, outroSelecionado?.id === u.id ? { backgroundColor: "#F7F2EC", borderColor: "#B08D57" } : {}]} onPress={() => setOutroSelecionado(u)}>
+                  <Image source={{ uri: u.avatar_url || "https://i.pravatar.cc/150?img=1" }} style={styles.usuarioAvatar} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontWeight: "700" }}>{u.nome || u.username}</Text>
+                    <Text style={{ color: "#666", fontSize: 13 }}>@{u.username || u.nome}</Text>
+                  </View>
+                  {outroSelecionado?.id === u.id && <Text style={{ color: "#B08D57", fontWeight: "800" }}>✓</Text>}
+                </TouchableOpacity>
+              ))}
+              {usuariosFiltrados.length === 0 && <Text style={styles.vazio}>Nenhum usuário encontrado. Crie outro usuário para testar.</Text>}
+            </ScrollView>
+            <TouchableOpacity style={[styles.verPerfilBtn, { marginTop: 12, opacity: outroSelecionado ? 1 : 0.5 }]} disabled={!outroSelecionado} onPress={() => outroSelecionado && criarOuAbrirConversa(outroSelecionado)}><Text style={styles.verPerfilTexto}>Começar conversa</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.cancelarBtn} onPress={() => { setShowNovaMensagem(false); setOutroSelecionado(null); }}><Text style={styles.cancelarTexto}>Cancelar</Text></TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -303,9 +354,9 @@ export function MensagensScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalBoxGrande}>
             {perfilVisitado && (<>
-              <Image source={{ uri: perfilVisitado.avatar }} style={styles.perfilAvatar} />
-              <Text style={styles.perfilNome}>@{perfilVisitado.autor}</Text>
-              <Text style={styles.perfilBio}>{perfilVisitado.bio}</Text>
+              <Image source={{ uri: perfilVisitado.avatar_url || "https://i.pravatar.cc/150?img=1" }} style={styles.perfilAvatar} />
+              <Text style={styles.perfilNome}>@{perfilVisitado.username || perfilVisitado.nome}</Text>
+              <Text style={styles.perfilBio}>{perfilVisitado.bio || "Membro da comunidade Acompanhe."}</Text>
               <TouchableOpacity style={styles.verPerfilBtn} onPress={() => { setShowPerfil(false); Alert.alert("Perfil", "Aqui vai abrir a tela de perfil completa desse usuário."); }}><Text style={styles.verPerfilTexto}>Ver perfil completo</Text></TouchableOpacity>
             </>)}
             <TouchableOpacity style={styles.cancelarBtn} onPress={() => setShowPerfil(false)}><Text style={styles.cancelarTexto}>Fechar</Text></TouchableOpacity>
@@ -328,14 +379,15 @@ const styles = StyleSheet.create({
   buscaIcone: { fontSize: 16 },
   buscaInput: { flex: 1, fontSize: 14, color: "#1C1C1C" },
   buscaLimpar: { fontSize: 14, color: "#999", paddingHorizontal: 4 },
-  card: { backgroundColor: "#FFFFFF", borderRadius: 16, padding: 12, flexDirection: "row", alignItems: "center", marginBottom: 10 },
-  avatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: "#E8E0D8", marginRight: 12 },
+  card: { backgroundColor: "#FFFFFF", borderRadius: 16, padding: 12, flexDirection: "row", alignItems: "center", marginBottom: 10, gap: 8 },
+  avatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: "#E8E0D8", marginRight: 4 },
   nome: { fontWeight: "700", color: "#1C1C1C", fontSize: 15 },
   ultima: { fontSize: 13, color: "#6B6B6B", marginTop: 2 },
   tempo: { fontSize: 12, color: "#6B6B6B" },
+  cardRight: { width: 52, flexShrink: 0, alignItems: "flex-end", justifyContent: "center" },
   badge: { backgroundColor: "#B08D57", borderRadius: 999, minWidth: 22, height: 22, alignItems: "center", justifyContent: "center", marginTop: 6, paddingHorizontal: 6 },
   badgeTexto: { color: "#fff", fontSize: 12, fontWeight: "700" },
-  tresPontosBtn: { padding: 8, marginLeft: 6 },
+  tresPontosBtn: { width: 28, flexShrink: 0, alignItems: "center", justifyContent: "center", paddingVertical: 8 },
   tresPontos: { fontSize: 22, fontWeight: "700", color: "#6B6B6B" },
   vazio: { textAlign: "center", color: "#6B6B6B", marginTop: 30 },
 
@@ -375,4 +427,6 @@ const styles = StyleSheet.create({
   verPerfilTexto: { color: "#fff", fontWeight: "700" },
   label: { fontWeight: "700", marginTop: 12, marginBottom: 6 },
   inputModal: { borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 },
+  usuarioRow: { flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1, borderColor: "#eee", borderRadius: 12, padding: 10, marginBottom: 8 },
+  usuarioAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: "#E8E0D8" },
 });
